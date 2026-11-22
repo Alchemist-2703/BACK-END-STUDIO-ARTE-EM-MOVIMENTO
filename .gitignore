@@ -1,0 +1,15 @@
+# Segredos: NUNCA enviar para o GitHub
+.env
+.env.*
+!.env.example
+
+# Arquivos gerados pelo Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / sistema
+.vscode/
+.idea/
+.DS_Store
