@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, date
 from typing import Optional, Dict, Any
 from app.core.supabase import get_supabase
@@ -36,14 +36,18 @@ def obter_resumo_financeiro(
 
     # 2. Busca as despesas cujo vencimento cai no mês selecionado
     # Ex: data_vencimento >= 2026-11-01 e <= 2026-11-31
+    # (usa "primeiro dia do mês seguinte" como limite, porque "31" não existe em todos os meses)
+    try:
+        ano_ref, mes_ref = int(mes_referencia[:4]), int(mes_referencia[5:7])
+        proximo_mes = date(ano_ref + (1 if mes_ref == 12 else 0), 1 if mes_ref == 12 else mes_ref + 1, 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Mês inválido. Use o formato AAAA-MM (ex: 2026-11).")
     inicio_mes = f"{mes_referencia}-01"
-    # Para simplificar o filtro sem depender de lib extra de calendário
-    fim_mes = f"{mes_referencia}-31"
-    
+
     despesas_res = supabase.table("despesas")\
         .select("id, valor, status, data_vencimento")\
         .gte("data_vencimento", inicio_mes)\
-        .lte("data_vencimento", fim_mes)\
+        .lt("data_vencimento", proximo_mes.isoformat())\
         .execute()
     
     despesas = despesas_res.data or []

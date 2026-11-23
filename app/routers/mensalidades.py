@@ -61,5 +61,5 @@ def dar_baixa_manual(mensalidade_id: int, valor_pago: float, forma_pagamento: st
         "valor_pago": valor_pago,
         "data_pagamento": datetime.now().isoformat(),
         "forma_pagamento": forma_pagamento
-    }).eq("id", id).execute()
+    }).eq("id", mensalidade_id).execute()
     return {"message": "Baixa realizada com sucesso!"}
