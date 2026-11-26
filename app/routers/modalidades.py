@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 from app.core.supabase import get_supabase
+from app.services.previsao import sincronizar_seguro
 
 router = APIRouter(prefix="/modalidades", tags=["Modalidades"])
 
@@ -35,6 +36,11 @@ class ModalidadeUpdate(BaseModel):
         return v
 
 
+def _alunos_da_modalidade(supabase, modalidade_id: int):
+    linhas = supabase.table("matriculas").select("aluno_id").eq("modalidade_id", modalidade_id).execute().data or []
+    return sorted({l["aluno_id"] for l in linhas})
+
+
 @router.get("/")
 def listar_modalidades(ativo: bool = True):
     """Lista as modalidades oferecidas (ex: Muay Thai, Jiu-Jitsu, Pilates, Dança)."""
@@ -57,8 +63,8 @@ def cadastrar_modalidade(dados: ModalidadeCreate):
 def atualizar_modalidade(modalidade_id: int, dados: ModalidadeUpdate):
     """
     Edita nome, descrição, valor da mensalidade ou o status (ativo) de uma modalidade.
-    Só os campos enviados são alterados. Mudar o valor vale para as próximas cobranças;
-    mensalidades já geradas não são alteradas.
+    Só os campos enviados são alterados. Mudar o valor reajusta as mensalidades PENDENTES
+    (mês atual e seguintes) dos alunos da modalidade. Mensalidades já pagas não mudam.
     """
     campos = dados.model_dump(exclude_unset=True)
     if not campos:
@@ -72,6 +78,10 @@ def atualizar_modalidade(modalidade_id: int, dados: ModalidadeUpdate):
     res = supabase.table("modalidades").update(campos).eq("id", modalidade_id).execute()
     if not res.data:
         raise HTTPException(status_code=400, detail="Não foi possível atualizar a modalidade.")
+
+    # Preço novo ou modalidade desativada: reajusta as mensalidades AINDA NÃO PAGAS dos alunos dela
+    if "valor_mensalidade" in campos or "ativo" in campos:
+        sincronizar_seguro(supabase, _alunos_da_modalidade(supabase, modalidade_id))
     return {"message": "Modalidade atualizada com sucesso!", "modalidade": res.data[0]}
 
 
@@ -101,4 +111,5 @@ def excluir_modalidade(modalidade_id: int, permanente: bool = False):
         return {"message": f"Modalidade '{nome}' excluída permanentemente."}
     else:
         supabase.table("modalidades").update({"ativo": False}).eq("id", modalidade_id).execute()
+        sincronizar_seguro(supabase, _alunos_da_modalidade(supabase, modalidade_id))
         return {"message": f"Modalidade '{nome}' desativada com sucesso."}

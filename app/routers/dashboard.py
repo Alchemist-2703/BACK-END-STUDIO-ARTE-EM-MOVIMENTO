@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, date
 from typing import Optional, Dict, Any
 from app.core.supabase import get_supabase
+from app.services.previsao import esta_atrasada, garantir_previsao
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard Financeiro"])
 
@@ -26,9 +27,12 @@ def obter_resumo_financeiro(
     if not mes_referencia:
         mes_referencia = hoje.strftime("%Y-%m")
 
+    # Garante que os alunos ativos tenham as mensalidades previstas (mês atual e seguintes)
+    garantir_previsao(supabase)
+
     # 1. Busca todas as mensalidades daquele mês
     mensalidades_res = supabase.table("mensalidades")\
-        .select("id, aluno_id, valor_devido, valor_pago, status, data_vencimento")\
+        .select("id, aluno_id, referencia_mes, valor_devido, valor_pago, status, data_vencimento")\
         .eq("referencia_mes", mes_referencia)\
         .execute()
     
@@ -70,13 +74,14 @@ def obter_resumo_financeiro(
         v_devido = float(m["valor_devido"] or 0)
         v_pago = float(m["valor_pago"] or 0)
         status = m.get("status", "").upper()
-        vencimento = datetime.strptime(m["data_vencimento"], "%Y-%m-%d").date()
+        if status == "CANCELADO":
+            continue
 
         total_receita_prevista += v_devido
 
         if status == "PAGO":
             total_receita_realizada += v_pago if v_pago > 0 else v_devido
-        elif status == "ATRASADO" or (status == "PENDENTE" and vencimento < hoje):
+        elif esta_atrasada(m, hoje):  # pendente a partir do dia 15 do mês de referência
             total_inadimplente += v_devido
             alunos_inadimplentes_set.add(m["aluno_id"])
         else: # PENDENTE e dentro do prazo

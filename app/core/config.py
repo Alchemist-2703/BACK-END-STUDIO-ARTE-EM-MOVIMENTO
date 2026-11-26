@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     JWT_SECRET: str = os.getenv("JWT_SECRET", "")              # obrigatória: texto aleatório com 32+ caracteres
     TOKEN_HORAS: int = int(os.getenv("TOKEN_HORAS", "24"))     # quanto tempo o login vale
 
+    # Regras de cobrança
+    DIA_LIMITE_ATRASO: int = int(os.getenv("DIA_LIMITE_ATRASO", "15"))   # a partir desse dia do mês, a mensalidade pendente conta como atrasada
+    MESES_PREVISAO: int = int(os.getenv("MESES_PREVISAO", "12"))         # quantos meses (contando o atual) ficam com mensalidades previstas
+
     # Quem pode chamar a API pelo navegador (endereços do front, separados por vírgula)
     CORS_ORIGINS: str = os.getenv(
         "CORS_ORIGINS",
