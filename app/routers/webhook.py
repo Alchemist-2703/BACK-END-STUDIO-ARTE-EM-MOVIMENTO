@@ -1,17 +1,15 @@
 import hashlib
 import hmac
 import json
+import mimetypes
 import requests
-from typing import Optional
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
-from app.services.conciliacao import (
-    processar_comprovante_e_conciliar,
-    remetente_e_cadastrado,
-    MIMES_ACEITOS,
-    EXTENSAO_POR_MIME,
-)
+from app.core.supabase import get_supabase
+from app.services.conciliacao import MIMES_ACEITOS, EXTENSAO_POR_MIME, remetente_e_cadastrado
+from app.services.fila import enfileirar_comprovante, processar_agora, registrar_notificador
 from app.core.config import settings
 from app.core.security import exigir_login
 
@@ -76,7 +74,36 @@ def assinatura_valida(corpo: bytes, cabecalho: Optional[str]) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# Upload manual (usado pelo front)
+# Resposta ao remetente (a fila chama isto quando termina de processar o comprovante)
+# ----------------------------------------------------------------------------
+def _texto_resposta(resultado: Dict[str, Any]) -> str:
+    status = resultado.get("status_conciliacao")
+    valor = float((resultado.get("dados_extraidos") or {}).get("valor_pago") or 0)
+    valor_txt = f"R$ {valor:.2f}".replace(".", ",")
+    cabecalho = "🥋 *Studio Arte em Movimento*\n\n"
+
+    if status == "BAIXA_AUTOMATICA_SUCESSO":
+        return (cabecalho + f"Olá! Confirmamos o recebimento do seu Pix no valor de *{valor_txt}*.\n"
+                "Sua mensalidade já foi *quitada com sucesso* no sistema! ✅\n\nÓtimo treino!")
+    if status == "COMPROVANTE_DUPLICADO":
+        return cabecalho + "Esse comprovante já foi registrado antes. Está tudo certo! ✅"
+    if status in ("VALOR_DIVERGENTE", "SEM_MENSALIDADES_PENDENTES"):
+        return (cabecalho + f"Recebemos seu comprovante de *{valor_txt}*. Como o valor não é igual ao da sua mensalidade em aberto, "
+                "a recepção vai conferir manualmente e retorna em breve!")
+    return cabecalho + "Recebemos seu comprovante e a recepção vai conferir manualmente. Obrigado!"
+
+
+def _notificar_whatsapp(comprovante: Dict[str, Any], resultado: Dict[str, Any]) -> None:
+    telefone = comprovante.get("telefone_remetente")
+    if telefone:
+        enviar_mensagem_whatsapp(telefone, _texto_resposta(resultado))
+
+
+registrar_notificador("WHATSAPP", _notificar_whatsapp)
+
+
+# ----------------------------------------------------------------------------
+# Upload manual (usado pelo front): entra na fila e já mostra o resultado
 # ----------------------------------------------------------------------------
 @router.post("/comprovante/upload", dependencies=[Depends(exigir_login)])
 async def upload_e_conciliar_comprovante(
@@ -87,14 +114,17 @@ async def upload_e_conciliar_comprovante(
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo vazio.")
 
-    mime = arquivo.content_type if arquivo.content_type in MIMES_ACEITOS else None
+    nome = arquivo.filename or "comprovante.jpg"
+    mime = arquivo.content_type if arquivo.content_type in MIMES_ACEITOS else mimetypes.guess_type(nome)[0]
+    if mime not in MIMES_ACEITOS:
+        raise HTTPException(status_code=400, detail="Formato não aceito. Envie uma imagem (PNG, JPG, WEBP) ou um PDF.")
 
-    return await processar_comprovante_e_conciliar(
-        arquivo_bytes=conteudo,
-        nome_arquivo=arquivo.filename or "comprovante.jpg",
-        telefone_remetente=telefone_remetente,
-        mime_type=mime,
-    )
+    supabase = get_supabase()
+    try:
+        comp = await run_in_threadpool(enfileirar_comprovante, supabase, conteudo, nome, mime, "UPLOAD", telefone_remetente, True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Não foi possível guardar o comprovante: {e}")
+    return await run_in_threadpool(processar_agora, supabase, comp["id"])
 
 
 # ----------------------------------------------------------------------------
@@ -145,7 +175,7 @@ async def processar_mensagem(msg: dict):
       1) a mensagem é imagem ou documento (PDF);
       2) o tipo do arquivo é aceito;
       3) o telefone de quem enviou é de um aluno/responsável cadastrado.
-    Todo o resto é ignorado em silêncio.
+    O arquivo vai para a FILA: a leitura pela IA e a baixa acontecem depois, um comprovante por vez.
     """
     msg_id = msg.get("id")
     if msg_id in _MENSAGENS_VISTAS:
@@ -173,31 +203,7 @@ async def processar_mensagem(msg: dict):
         return
 
     nome_arquivo = midia.get("filename") or f"comprovante_whatsapp.{EXTENSAO_POR_MIME[mime]}"
-
-    resultado = await processar_comprovante_e_conciliar(
-        arquivo_bytes=arquivo_bytes,
-        nome_arquivo=nome_arquivo,
-        telefone_remetente=telefone,
-        mime_type=mime,
-    )
-
-    status = resultado.get("status_conciliacao")
-    valor = (resultado.get("dados_extraidos") or {}).get("valor_pago", 0)
-    cabecalho = "🥋 *Studio Arte em Movimento*\n\n"
-
-    if status == "BAIXA_AUTOMATICA_SUCESSO":
-        texto = (cabecalho +
-                 f"Olá! Confirmamos o recebimento do seu Pix no valor de *R$ {valor:.2f}*.\n"
-                 "Sua mensalidade já foi *quitada com sucesso* no sistema! ✅\n\nÓtimo treino!")
-    elif status == "VALOR_DIVERGENTE":
-        texto = (cabecalho +
-                 f"Identificamos seu comprovante de *R$ {valor:.2f}*, porém o valor diverge da sua fatura em aberto.\n"
-                 "Encaminhamos para a recepção verificar manualmente. Em breve retornamos!")
-    elif status == "COMPROVANTE_DUPLICADO":
-        texto = cabecalho + "Esse comprovante já foi registrado antes. Está tudo certo! ✅"
-    elif status == "SEM_MENSALIDADES_PENDENTES":
-        texto = cabecalho + "Recebemos seu comprovante, mas você não tem mensalidade em aberto no momento. A recepção vai conferir."
-    else:
-        texto = cabecalho + "Recebemos seu comprovante e a recepção vai conferir manualmente. Obrigado!"
-
-    await run_in_threadpool(enviar_mensagem_whatsapp, telefone, texto)
+    try:
+        await run_in_threadpool(enfileirar_comprovante, get_supabase(), arquivo_bytes, nome_arquivo, mime, "WHATSAPP", telefone)
+    except Exception as e:
+        print(f"[WhatsApp] Não consegui colocar o comprovante na fila: {e}")

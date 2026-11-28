@@ -429,6 +429,25 @@ def atualizar_aluno(aluno_id: int, dados: AlunoUpdate):
 
     return {"message": "Aluno atualizado com sucesso!", "valor_mensal": calculo["valor_mensal"] if calculo else None}
 
+@router.patch("/{aluno_id}/reativar")
+def reativar_aluno(aluno_id: int):
+    """Reativa um aluno desativado: ele volta para a lista e a previsão de mensalidades é recriada."""
+    supabase = get_supabase()
+    check = supabase.table("alunos").select("id, nome, ativo").eq("id", aluno_id).execute()
+    if not check.data:
+        raise HTTPException(status_code=404, detail="Aluno não encontrado.")
+    aluno = check.data[0]
+    if aluno.get("ativo") is not False:
+        raise HTTPException(status_code=409, detail="Este aluno já está ativo.")
+    supabase.table("alunos").update({"ativo": True, "atualizado_em": datetime.now().isoformat()}).eq("id", aluno_id).execute()
+    previsao = sincronizar_seguro(supabase, [aluno_id])
+    calculo = _aluno_com_calculo(supabase, aluno_id)
+    return {
+        "message": f"Aluno '{aluno['nome']}' reativado com sucesso.",
+        "valor_mensal": calcular_valor_mensal(calculo)["valor_mensal"] if calculo else None,
+        "previsao_mensalidades": previsao,
+    }
+
 @router.post("/{aluno_id}/matriculas", status_code=201)
 def matricular_aluno(aluno_id: int, dados: MatriculaAdicionar):
     """Matricula um aluno JÁ cadastrado em mais modalidades (e, se quiser, define o desconto)."""

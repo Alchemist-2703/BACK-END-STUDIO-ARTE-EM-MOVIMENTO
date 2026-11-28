@@ -126,7 +126,7 @@ def _sincronizar(supabase, aluno_ids: Optional[List[int]]) -> Dict[str, int]:
     existentes: Dict[int, Dict[str, List[Dict[str, Any]]]] = {}
     for bloco in _blocos([a["id"] for a in alunos], 100):
         linhas = supabase.table("mensalidades")\
-            .select("id, aluno_id, referencia_mes, status, valor_devido")\
+            .select("id, aluno_id, referencia_mes, status, valor_devido, valor_pago")\
             .in_("aluno_id", bloco).gte("referencia_mes", atual).execute().data or []
         for l in linhas:
             existentes.setdefault(l["aluno_id"], {}).setdefault(l["referencia_mes"], []).append(l)
@@ -154,11 +154,11 @@ def _sincronizar(supabase, aluno_ids: Optional[List[int]]) -> Dict[str, int]:
                         if l["status"] in ("PENDENTE", "ATRASADO") and abs(float(l["valor_devido"] or 0) - esperado) > 0.004:
                             atualizar.setdefault(esperado, []).append(l["id"])
         else:
-            # aluno desativado: some a previsão dos meses seguintes (o mês atual fica para o administrador resolver).
-            # aluno ativo sem modalidade: some a previsão do mês atual também.
+            # aluno desativado (ou sem modalidade): some a previsão do mês atual e dos seguintes que ainda não
+            # receberam nenhum pagamento. Mensalidades pagas, parciais ou nulas ficam como estão.
             for mes, linhas in por_mes.items():
-                if ativo or mes > atual:
-                    remover.extend(l["id"] for l in linhas if l["status"] == "PENDENTE")
+                remover.extend(l["id"] for l in linhas
+                               if l["status"] == "PENDENTE" and float(l.get("valor_pago") or 0) == 0)
 
     for bloco in _blocos(inserir, 200):
         supabase.table("mensalidades").insert(bloco).execute()

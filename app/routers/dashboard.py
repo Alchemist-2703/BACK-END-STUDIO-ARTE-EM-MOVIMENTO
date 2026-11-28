@@ -69,25 +69,30 @@ def obter_resumo_financeiro(
     total_inadimplente = 0.0
     
     alunos_inadimplentes_set = set()
+    qtd_mensalidades = 0
 
     for m in mensalidades:
         v_devido = float(m["valor_devido"] or 0)
         v_pago = float(m["valor_pago"] or 0)
         status = m.get("status", "").upper()
-        if status == "CANCELADO":
+        if status in ("CANCELADO", "NULO"):  # não entram em nenhuma conta
             continue
+        qtd_mensalidades += 1
 
         total_receita_prevista += v_devido
 
         if status == "PAGO":
             total_receita_realizada += v_pago if v_pago > 0 else v_devido
-        elif esta_atrasada(m, hoje):  # pendente a partir do dia 15 do mês de referência
-            total_inadimplente += v_devido
-            alunos_inadimplentes_set.add(m["aluno_id"])
-        else: # PENDENTE e dentro do prazo
-            total_pendente += v_devido
+        else:
+            restante = max(0.0, v_devido - v_pago)   # pagamento parcial: o que já entrou conta como recebido
+            total_receita_realizada += v_pago
+            if esta_atrasada(m, hoje):  # pendente a partir do dia 15 do mês de referência
+                total_inadimplente += restante
+                if restante > 0:
+                    alunos_inadimplentes_set.add(m["aluno_id"])
+            else: # PENDENTE e dentro do prazo
+                total_pendente += restante
 
-    qtd_mensalidades = len(mensalidades)
     taxa_inadimplencia = 0.0
     if qtd_mensalidades > 0:
         taxa_inadimplencia = round((len(alunos_inadimplentes_set) / qtd_mensalidades) * 100, 1)
